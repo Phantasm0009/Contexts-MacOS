@@ -8,6 +8,7 @@ enum SharedModelContainer {
             AppResource.self,
             WebResource.self,
             WindowSnapshot.self,
+            ContextSessionLog.self,
         ])
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {

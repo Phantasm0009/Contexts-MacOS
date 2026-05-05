@@ -17,6 +17,9 @@ enum WorkspaceEngineError: LocalizedError {
 
 /// Captures window geometry via Quartz Window Services and (when trusted) refines frames with Accessibility (`AXUIElement`).
 final class WorkspaceEngine {
+    static let shared = WorkspaceEngine()
+
+    private init() {}
 
     private nonisolated(unsafe) static let axFrameAttribute = "AXFrame" as CFString
     private nonisolated(unsafe) static let axPositionAttribute = "AXPosition" as CFString

@@ -1,6 +1,13 @@
 import Combine
 import Foundation
+import os
 import SwiftData
+
+enum ContextsPreferences {
+    /// When enabled, running a context hides regular apps not included in that context.
+    /// Off by default to avoid unexpectedly hiding active user work.
+    static let hideUnassociatedAppsOnRunKey = "com.contexts.Contexts.hideUnassociatedAppsOnRun"
+}
 
 extension Notification.Name {
     /// Posted when persisted session timing (`sessionStartTime`) or related defaults change outside UUID-only updates (e.g. Shortcuts re-run).
@@ -54,6 +61,8 @@ extension UserDefaults {
 /// Tracks the last context activated from Contexts UI (menu bar today; dashboard later) and orchestrates Workspace runs.
 @MainActor
 final class SessionManager: ObservableObject {
+    private static let logger = Logger(subsystem: "com.contexts.Contexts", category: "SessionManager")
+
     @Published var activeContext: WorkContext?
     /// Persisted session clock start for `activeContext`; mirrored from `ActiveContextUserDefaults`.
     @Published var sessionStartTime: Date?
@@ -116,6 +125,7 @@ final class SessionManager: ObservableObject {
 
     /// Clears the in-memory active session and removes the persisted UUID (menu bar / Shortcuts stay consistent).
     func clearActiveSession() {
+        closeCurrentSessionLog(endedAt: Date())
         activeContext = nil
         sessionStartTime = nil
         ActiveContextUserDefaults.clearActiveWorkContext()
@@ -123,8 +133,20 @@ final class SessionManager: ObservableObject {
 
     /// Launch apps, open URLs, restore window snapshots, then mark `context` as active.
     func run(context: WorkContext) async {
-        let bundleIDs = context.appResources.map(\.bundleID)
-        let urls = context.webResources.compactMap { URL(string: $0.urlString) }
+        let sortedApps = context.appResources.sorted {
+            let a = $0.sortOrder ?? Int.max
+            let b = $1.sortOrder ?? Int.max
+            if a != b { return a < b }
+            return $0.bundleID.localizedStandardCompare($1.bundleID) == .orderedAscending
+        }
+        let sortedWeb = context.webResources.sorted {
+            let a = $0.sortOrder ?? Int.max
+            let b = $1.sortOrder ?? Int.max
+            if a != b { return a < b }
+            return $0.urlString.localizedStandardCompare($1.urlString) == .orderedAscending
+        }
+        let bundleIDs = sortedApps.map(\.bundleID)
+        let urls = sortedWeb.compactMap { URL(string: $0.urlString) }
         let snapshotTuples = context.windowSnapshots.map {
             (
                 bundleID: $0.bundleID,
@@ -136,7 +158,7 @@ final class SessionManager: ObservableObject {
             )
         }
 
-        let engine = WorkspaceEngine()
+        let engine = WorkspaceEngine.shared
 
         do {
             for bundleID in bundleIDs {
@@ -157,7 +179,10 @@ final class SessionManager: ObservableObject {
                 _ = engine.open(url: url)
             }
 
-            engine.hideUnassociatedApps(keeping: bundleIDs)
+            let shouldHideUnassociatedApps = UserDefaults.standard.bool(forKey: ContextsPreferences.hideUnassociatedAppsOnRunKey)
+            if shouldHideUnassociatedApps {
+                engine.hideUnassociatedApps(keeping: bundleIDs)
+            }
 
             await engine.waitForAppsToLaunch(bundleIDs: bundleIDs)
 
@@ -176,12 +201,49 @@ final class SessionManager: ObservableObject {
             engine.runInstalledShortcutIfConfigured(named: context.focusShortcutName ?? "")
 
             let now = Date()
+            closeCurrentSessionLog(endedAt: now)
+            context.lastRunAt = now
+            startSessionLog(for: context, at: now)
             ActiveContextUserDefaults.saveSessionStartTime(now)
             activeContext = context
             ActiveContextUserDefaults.saveActiveWorkContext(uuid: context.id)
             sessionStartTime = now
         } catch {
-            print("[Contexts] SessionManager.run(“\(context.name)”): \(error.localizedDescription)")
+            Self.logger.error("run(\(context.name, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func startSessionLog(for context: WorkContext, at start: Date) {
+        let modelContext = ModelContext(SharedModelContainer.shared)
+        let log = ContextSessionLog(
+            contextID: context.id,
+            contextName: context.name,
+            startedAt: start
+        )
+        modelContext.insert(log)
+    }
+
+    private func closeCurrentSessionLog(endedAt: Date) {
+        guard let activeContext, let startedAt = sessionStartTime else { return }
+        let modelContext = ModelContext(SharedModelContainer.shared)
+        let descriptor = FetchDescriptor<ContextSessionLog>(sortBy: [SortDescriptor(\ContextSessionLog.startedAt, order: .reverse)])
+        let open = try? modelContext.fetch(descriptor).first(where: { $0.contextID == activeContext.id && $0.endedAt == nil })
+
+        if let open {
+            open.endedAt = endedAt
+            open.durationSeconds = max(0, endedAt.timeIntervalSince(open.startedAt))
+            return
+        }
+
+        // Recovery path for old runs that predate session logging.
+        modelContext.insert(
+            ContextSessionLog(
+                contextID: activeContext.id,
+                contextName: activeContext.name,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                durationSeconds: max(0, endedAt.timeIntervalSince(startedAt))
+            )
+        )
     }
 }

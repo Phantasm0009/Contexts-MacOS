@@ -126,7 +126,7 @@ struct LaunchSavedContextIntent: AppIntent {
 
         let payload = try await fetchPayload(workContextID: uuid)
 
-        let engine = WorkspaceEngine()
+        let engine = WorkspaceEngine.shared
 
         for bundleID in payload.appBundleIDs {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -153,7 +153,6 @@ struct LaunchSavedContextIntent: AppIntent {
         // Build snapshots on the main actor so we never capture non-Sendable `WindowSnapshot` in a `@Sendable` closure.
         let snapshotTuples = payload.windowSnapshots
         await MainActor.run {
-            let restoreEngine = WorkspaceEngine()
             let snapshots = snapshotTuples.map {
                 WindowSnapshot(
                     bundleID: $0.bundleID,
@@ -164,12 +163,14 @@ struct LaunchSavedContextIntent: AppIntent {
                     stackOrder: $0.stackOrder
                 )
             }
-            restoreEngine.restoreWindows(from: snapshots)
+            WorkspaceEngine.shared.restoreWindows(from: snapshots)
         }
 
         engine.runInstalledShortcutIfConfigured(named: payload.focusShortcutName)
 
-        ActiveContextUserDefaults.saveSessionStartTime(Date())
+        let now = Date()
+        try await markRunInSharedStore(contextID: uuid, startedAt: now)
+        ActiveContextUserDefaults.saveSessionStartTime(now)
         ActiveContextUserDefaults.saveActiveWorkContext(uuid: uuid)
 
         return .result(dialog: IntentDialog(stringLiteral: "Ran “\(payload.displayName)” in Contexts."))
@@ -184,8 +185,22 @@ struct LaunchSavedContextIntent: AppIntent {
                 throw RunContextIntentError.notFound(id)
             }
 
-            let apps = wc.appResources.map(\.bundleID)
-            let urls = wc.webResources.compactMap { URL(string: $0.urlString) }
+            let apps = wc.appResources
+                .sorted {
+                    let a = $0.sortOrder ?? Int.max
+                    let b = $1.sortOrder ?? Int.max
+                    if a != b { return a < b }
+                    return $0.bundleID.localizedStandardCompare($1.bundleID) == .orderedAscending
+                }
+                .map(\.bundleID)
+            let urls = wc.webResources
+                .sorted {
+                    let a = $0.sortOrder ?? Int.max
+                    let b = $1.sortOrder ?? Int.max
+                    if a != b { return a < b }
+                    return $0.urlString.localizedStandardCompare($1.urlString) == .orderedAscending
+                }
+                .compactMap { URL(string: $0.urlString) }
 
             let snaps = wc.windowSnapshots.map {
                 (
@@ -204,6 +219,34 @@ struct LaunchSavedContextIntent: AppIntent {
                 urls: urls,
                 windowSnapshots: snaps,
                 focusShortcutName: wc.focusShortcutName ?? ""
+            )
+        }
+    }
+
+    private func markRunInSharedStore(contextID id: UUID, startedAt: Date) async throws {
+        try await MainActor.run {
+            let modelContext = ModelContext(SharedModelContainer.shared)
+            let descriptor = FetchDescriptor<WorkContext>()
+            let all = try modelContext.fetch(descriptor)
+            guard let wc = all.first(where: { $0.id == id }) else { return }
+
+            // Close any previously open session, then start a new one for this run.
+            let openDescriptor = FetchDescriptor<ContextSessionLog>(
+                predicate: #Predicate { $0.endedAt == nil },
+                sortBy: [SortDescriptor(\ContextSessionLog.startedAt, order: .reverse)]
+            )
+            if let open = try modelContext.fetch(openDescriptor).first {
+                open.endedAt = startedAt
+                open.durationSeconds = max(0, startedAt.timeIntervalSince(open.startedAt))
+            }
+
+            wc.lastRunAt = startedAt
+            modelContext.insert(
+                ContextSessionLog(
+                    contextID: wc.id,
+                    contextName: wc.name,
+                    startedAt: startedAt
+                )
             )
         }
     }

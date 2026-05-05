@@ -10,15 +10,63 @@ struct ContextEditorView: View {
     @Bindable var context: WorkContext
 
     @State private var newURLString = ""
+    @State private var isVerifyingShortcut = false
+    @State private var shortcutVerificationMessage: String?
+    @State private var shortcutVerificationIsError = false
 
     private let suggestedIcons = [
         "square.stack.3d.up.fill",
         "chevron.left.forwardslash.chevron.right",
+        "paintpalette.fill",
+        "film.stack.fill",
+        "music.note.list",
+        "waveform.path.ecg.rectangle.fill",
+        "newspaper.fill",
+        "book.fill",
+        "doc.richtext.fill",
+        "calendar",
+        "clock.fill",
+        "checklist.checked",
+        "list.bullet.rectangle.portrait.fill",
+        "folder.fill",
+        "folder.badge.gearshape",
+        "archivebox.fill",
+        "tray.full.fill",
         "doc.text.fill",
+        "doc.text.magnifyingglass",
+        "doc.badge.gearshape",
+        "globe",
+        "network",
+        "wifi",
+        "terminal",
         "hammer.fill",
+        "wrench.and.screwdriver.fill",
+        "gearshape.2.fill",
+        "chart.bar.fill",
+        "chart.line.uptrend.xyaxis",
+        "person.2.fill",
+        "person.3.fill",
         "bubble.left.and.bubble.right.fill",
+        "envelope.fill",
+        "phone.fill",
+        "video.fill",
+        "video.bubble.left.fill",
+        "camera.fill",
+        "mic.fill",
+        "headphones",
+        "gamecontroller.fill",
+        "shippingbox.fill",
+        "briefcase.fill",
+        "building.2.fill",
+        "graduationcap.fill",
+        "lightbulb.fill",
+        "sparkles",
         "person.crop.circle",
         "desktopcomputer",
+        "laptopcomputer",
+        "display.2",
+        "ipad",
+        "applewatch",
         "safari",
         "terminal.fill",
     ]
@@ -53,8 +101,35 @@ struct ContextEditorView: View {
                 }
             }
 
+            Section("Notes") {
+                TextEditor(
+                    text: Binding(
+                        get: { context.notes ?? "" },
+                        set: {
+                            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                            context.notes = trimmed.isEmpty ? nil : $0
+                        }
+                    )
+                )
+                .frame(minHeight: 90)
+                .font(.body)
+                .overlay(
+                    Group {
+                        if (context.notes ?? "").isEmpty {
+                            Text("What is this context for?")
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 6)
+                                .padding(.top, 8)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                )
+            }
+
             Section("Focus shortcut") {
-                TextField(
+                HStack(spacing: 8) {
+                    TextField(
                     "Shortcuts name (optional)",
                     text: Binding(
                         get: { context.focusShortcutName ?? "" },
@@ -63,8 +138,28 @@ struct ContextEditorView: View {
                             context.focusShortcutName = t.isEmpty ? nil : t
                         }
                     )
-                )
+                    )
                     .textContentType(.none)
+
+                    Button {
+                        Task { await verifyFocusShortcut() }
+                    } label: {
+                        if isVerifyingShortcut {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Verify")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isVerifyingShortcut || (context.focusShortcutName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if let shortcutVerificationMessage {
+                    Text(shortcutVerificationMessage)
+                        .font(.caption)
+                        .foregroundStyle(shortcutVerificationIsError ? .red : .green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(
                     "When this context runs, Contexts executes `/usr/bin/shortcuts run \"…\"`. "
                         + "Create a shortcut in the Shortcuts app (e.g. “Coding Focus”) and enter its exact name."
@@ -75,13 +170,35 @@ struct ContextEditorView: View {
             }
 
             Section("Applications") {
-                if context.appResources.isEmpty {
+                if appResourcesSorted.isEmpty {
                     Text("No applications yet").foregroundStyle(.secondary)
                 } else {
-                    ForEach(context.appResources) { resource in
-                        AppResourceEditorRow(resource: resource)
+                    List {
+                        ForEach(Array(appResourcesSorted.enumerated()), id: \.element.persistentModelID) { index, resource in
+                            AppResourceEditorRow(
+                                resource: resource,
+                                reorderIndex: index,
+                                reorderCount: appResourcesSorted.count,
+                                onMoveUp: { swapAdjacentAppResources(movingItemAt: index, direction: -1) },
+                                onMoveDown: { swapAdjacentAppResources(movingItemAt: index, direction: 1) }
+                            )
+                        }
+                        .onMove(perform: moveAppResources)
+                        .onDelete(perform: deleteAppResources)
                     }
-                    .onDelete(perform: deleteAppResources)
+                    .listStyle(.plain)
+                    .environment(\.defaultMinListRowHeight, 48)
+                    .frame(
+                        maxHeight: CGFloat(
+                            min(
+                                max(appResourcesSorted.count, 1) * 56 + 12,
+                                420
+                            )
+                        )
+                    )
+                    Text("Drag rows or use the arrows to set launch order.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Button("Choose Application...") {
                     chooseApplicationFromApplicationsFolder()
@@ -90,13 +207,35 @@ struct ContextEditorView: View {
             }
 
             Section("URLs") {
-                if context.webResources.isEmpty {
+                if webResourcesSorted.isEmpty {
                     Text("No URLs yet").foregroundStyle(.secondary)
                 } else {
-                    ForEach(context.webResources) { resource in
-                        WebResourceEditorRow(resource: resource)
+                    List {
+                        ForEach(Array(webResourcesSorted.enumerated()), id: \.element.persistentModelID) { index, resource in
+                            WebResourceEditorRow(
+                                resource: resource,
+                                reorderIndex: index,
+                                reorderCount: webResourcesSorted.count,
+                                onMoveUp: { swapAdjacentWebResources(movingItemAt: index, direction: -1) },
+                                onMoveDown: { swapAdjacentWebResources(movingItemAt: index, direction: 1) }
+                            )
+                        }
+                        .onMove(perform: moveWebResources)
+                        .onDelete(perform: deleteWebResources)
                     }
-                    .onDelete(perform: deleteWebResources)
+                    .listStyle(.plain)
+                    .environment(\.defaultMinListRowHeight, 40)
+                    .frame(
+                        maxHeight: CGFloat(
+                            min(
+                                max(webResourcesSorted.count, 1) * 44 + 12,
+                                420
+                            )
+                        )
+                    )
+                    Text("Drag rows or use the arrows to set open order.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 HStack {
                     TextField("https://…", text: $newURLString)
@@ -118,23 +257,8 @@ struct ContextEditorView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(windowSnapshotsSorted, id: \.persistentModelID) { snap in
-                        HStack(alignment: .top, spacing: 8) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(snap.bundleID).font(.body.monospaced())
-                                Text(
-                                    String(
-                                        format: "frame: (%.0f, %.0f)  %.0f×%.0f",
-                                        snap.x,
-                                        snap.y,
-                                        snap.width,
-                                        snap.height
-                                    )
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            }
-
-                            Spacer(minLength: 8)
+                        HStack(spacing: 8) {
+                            SnapshotEditorRow(snapshot: snap)
 
                             Button(role: .destructive) {
                                 modelContext.delete(snap)
@@ -170,7 +294,7 @@ struct ContextEditorView: View {
     }
 
     private func captureCurrentWorkspace() {
-        let engine = WorkspaceEngine()
+        let engine = WorkspaceEngine.shared
         let captured = engine.captureVisibleWindows()
         let existing = Array(context.windowSnapshots)
         for snap in existing {
@@ -230,7 +354,7 @@ struct ContextEditorView: View {
     /// Inserts an `AppResource` when that bundle ID is not already in this context.
     private func insertAppResourceIfNew(bundleID id: String) {
         guard !context.appResources.contains(where: { $0.bundleID == id }) else { return }
-        let resource = AppResource(bundleID: id, workContext: context)
+        let resource = AppResource(bundleID: id, sortOrder: nextAppSortOrder, workContext: context)
         modelContext.insert(resource)
     }
 
@@ -243,9 +367,10 @@ struct ContextEditorView: View {
     }
 
     private func deleteAppResources(at offsets: IndexSet) {
+        let resources = appResourcesSorted
         for index in offsets.sorted(by: >) {
-            guard context.appResources.indices.contains(index) else { continue }
-            modelContext.delete(context.appResources[index])
+            guard resources.indices.contains(index) else { continue }
+            modelContext.delete(resources[index])
         }
     }
 
@@ -259,15 +384,146 @@ struct ContextEditorView: View {
         } else {
             normalized = "https://" + trimmed
         }
-        let resource = WebResource(urlString: normalized, workContext: context)
+        let resource = WebResource(urlString: normalized, sortOrder: nextWebSortOrder, workContext: context)
         modelContext.insert(resource)
         newURLString = ""
     }
 
     private func deleteWebResources(at offsets: IndexSet) {
+        let resources = webResourcesSorted
         for index in offsets.sorted(by: >) {
-            guard context.webResources.indices.contains(index) else { continue }
-            modelContext.delete(context.webResources[index])
+            guard resources.indices.contains(index) else { continue }
+            modelContext.delete(resources[index])
+        }
+    }
+
+    private func moveAppResources(from source: IndexSet, to destination: Int) {
+        var items = appResourcesSorted
+        items.move(fromOffsets: source, toOffset: destination)
+        renumberAppResourceSortOrders(items)
+    }
+
+    private func moveWebResources(from source: IndexSet, to destination: Int) {
+        var items = webResourcesSorted
+        items.move(fromOffsets: source, toOffset: destination)
+        renumberWebResourceSortOrders(items)
+    }
+
+    private func swapAdjacentAppResources(movingItemAt index: Int, direction: Int) {
+        var items = appResourcesSorted
+        guard direction == -1 || direction == 1 else { return }
+        let pairStart: Int
+        if direction < 0 {
+            guard index > 0 else { return }
+            pairStart = index - 1
+        } else {
+            guard index < items.count - 1 else { return }
+            pairStart = index
+        }
+        items.swapAt(pairStart, pairStart + 1)
+        renumberAppResourceSortOrders(items)
+    }
+
+    private func swapAdjacentWebResources(movingItemAt index: Int, direction: Int) {
+        var items = webResourcesSorted
+        guard direction == -1 || direction == 1 else { return }
+        let pairStart: Int
+        if direction < 0 {
+            guard index > 0 else { return }
+            pairStart = index - 1
+        } else {
+            guard index < items.count - 1 else { return }
+            pairStart = index
+        }
+        items.swapAt(pairStart, pairStart + 1)
+        renumberWebResourceSortOrders(items)
+    }
+
+    private func renumberAppResourceSortOrders(_ items: [AppResource]) {
+        for (idx, resource) in items.enumerated() {
+            resource.sortOrder = idx
+        }
+    }
+
+    private func renumberWebResourceSortOrders(_ items: [WebResource]) {
+        for (idx, resource) in items.enumerated() {
+            resource.sortOrder = idx
+        }
+    }
+
+    private var appResourcesSorted: [AppResource] {
+        context.appResources.sorted {
+            let a = $0.sortOrder ?? Int.max
+            let b = $1.sortOrder ?? Int.max
+            if a != b { return a < b }
+            return $0.bundleID.localizedStandardCompare($1.bundleID) == .orderedAscending
+        }
+    }
+
+    private var webResourcesSorted: [WebResource] {
+        context.webResources.sorted {
+            let a = $0.sortOrder ?? Int.max
+            let b = $1.sortOrder ?? Int.max
+            if a != b { return a < b }
+            return $0.urlString.localizedStandardCompare($1.urlString) == .orderedAscending
+        }
+    }
+
+    private var nextAppSortOrder: Int {
+        (context.appResources.compactMap(\.sortOrder).max() ?? -1) + 1
+    }
+
+    private var nextWebSortOrder: Int {
+        (context.webResources.compactMap(\.sortOrder).max() ?? -1) + 1
+    }
+
+    private func verifyFocusShortcut() async {
+        let name = (context.focusShortcutName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        isVerifyingShortcut = true
+        shortcutVerificationMessage = nil
+        defer { isVerifyingShortcut = false }
+
+        do {
+            let output = try await listInstalledShortcuts()
+            let exists = output
+                .split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+
+            shortcutVerificationIsError = !exists
+            shortcutVerificationMessage = exists
+                ? "Shortcut found."
+                : "Shortcut not found in `shortcuts list`."
+        } catch {
+            shortcutVerificationIsError = true
+            shortcutVerificationMessage = "Unable to verify shortcut: \(error.localizedDescription)"
+        }
+    }
+
+    private func listInstalledShortcuts() async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+            process.arguments = ["list"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            process.terminationHandler = { proc in
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(decoding: data, as: UTF8.self)
+                if proc.terminationStatus == 0 {
+                    continuation.resume(returning: output)
+                } else {
+                    continuation.resume(throwing: NSError(domain: "Contexts.Shortcuts", code: Int(proc.terminationStatus), userInfo: nil))
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
     }
 }
@@ -277,6 +533,25 @@ private struct AppResourceEditorRow: View {
     @Bindable var resource: AppResource
 
     @State private var isEditingBundleID = false
+
+    private let reorderIndex: Int?
+    private let reorderCount: Int?
+    private let onMoveUp: (() -> Void)?
+    private let onMoveDown: (() -> Void)?
+
+    init(
+        resource: AppResource,
+        reorderIndex: Int? = nil,
+        reorderCount: Int? = nil,
+        onMoveUp: (() -> Void)? = nil,
+        onMoveDown: (() -> Void)? = nil
+    ) {
+        self._resource = Bindable(wrappedValue: resource)
+        self.reorderIndex = reorderIndex
+        self.reorderCount = reorderCount
+        self.onMoveUp = onMoveUp
+        self.onMoveDown = onMoveDown
+    }
 
     private var trimmedBundleID: String {
         resource.bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -317,6 +592,31 @@ private struct AppResourceEditorRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
+                if let idx = reorderIndex,
+                   let count = reorderCount,
+                   let onMoveUp,
+                   let onMoveDown
+                {
+                    VStack(spacing: 2) {
+                        Button(action: onMoveUp) {
+                            Image(systemName: "chevron.up")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(idx == 0)
+                        .help("Move up")
+
+                        Button(action: onMoveDown) {
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(idx >= count - 1)
+                        .help("Move down")
+                    }
+                    .frame(width: 18)
+                }
+
                 Group {
                     if let icon = resolvedIcon {
                         Image(nsImage: icon)
@@ -376,12 +676,123 @@ private struct AppResourceEditorRow: View {
     }
 }
 
+private struct SnapshotEditorRow: View {
+    let snapshot: WindowSnapshot
+
+    @State private var isHovering = false
+
+    private var bundleID: String { snapshot.bundleID.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private var applicationURL: URL? {
+        guard !bundleID.isEmpty else { return nil }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+    }
+
+    private var icon: NSImage {
+        if let url = applicationURL {
+            return NSWorkspace.shared.icon(forFile: url.path)
+        }
+        return NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns")
+    }
+
+    private var appDisplayName: String {
+        guard let url = applicationURL else { return bundleID }
+        let bundle = Bundle(url: url)
+        let candidates: [String?] = [
+            bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String,
+            bundle?.localizedInfoDictionary?["CFBundleName"] as? String,
+            bundle?.infoDictionary?["CFBundleDisplayName"] as? String,
+            bundle?.infoDictionary?["CFBundleName"] as? String,
+        ]
+        if let name = candidates.compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) }).first(where: { !$0.isEmpty }) {
+            return name
+        }
+        return FileManager.default.displayName(atPath: url.path)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 20, height: 20)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(appDisplayName)
+                    .font(.body)
+                if isHovering {
+                    Text(
+                        String(
+                            format: "frame: (%.0f, %.0f)  %.0f×%.0f",
+                            snapshot.x,
+                            snapshot.y,
+                            snapshot.width,
+                            snapshot.height
+                        )
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+}
+
 private struct WebResourceEditorRow: View {
     @Environment(\.modelContext) private var modelContext
     @Bindable var resource: WebResource
 
+    private let reorderIndex: Int?
+    private let reorderCount: Int?
+    private let onMoveUp: (() -> Void)?
+    private let onMoveDown: (() -> Void)?
+
+    init(
+        resource: WebResource,
+        reorderIndex: Int? = nil,
+        reorderCount: Int? = nil,
+        onMoveUp: (() -> Void)? = nil,
+        onMoveDown: (() -> Void)? = nil
+    ) {
+        self._resource = Bindable(wrappedValue: resource)
+        self.reorderIndex = reorderIndex
+        self.reorderCount = reorderCount
+        self.onMoveUp = onMoveUp
+        self.onMoveDown = onMoveDown
+    }
+
     var body: some View {
         HStack(spacing: 8) {
+            if let idx = reorderIndex,
+               let count = reorderCount,
+               let onMoveUp,
+               let onMoveDown
+            {
+                VStack(spacing: 2) {
+                    Button(action: onMoveUp) {
+                        Image(systemName: "chevron.up")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(idx == 0)
+                    .help("Move up")
+
+                    Button(action: onMoveDown) {
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(idx >= count - 1)
+                    .help("Move down")
+                }
+                .frame(width: 18)
+            }
+
             TextField("URL", text: $resource.urlString)
                 .textContentType(.URL)
                 .textSelection(.enabled)
